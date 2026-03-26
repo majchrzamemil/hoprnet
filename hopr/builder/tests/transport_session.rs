@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 #[cfg(feature = "session-client")]
 use futures::future::try_join_all;
 use hopr_builder::testing::{
@@ -10,15 +8,10 @@ use hopr_builder::testing::{
 };
 use hopr_chain_connector::blokli_client::BlokliQueryClient;
 #[cfg(feature = "session-client")]
-use hopr_lib::{
-    HopRouting, HoprBalance, HoprSessionClientConfig, SessionCapabilities, SessionTarget,
-    exports::transport::session::{IpOrHost, SealedHost},
-};
+use hopr_lib::HoprBalance;
 use rand::seq::SliceRandom;
 use rstest::*;
 use serial_test::serial;
-#[cfg(feature = "session-client")]
-use tokio::time::sleep;
 
 const FUNDING_AMOUNT: &str = "100 wxHOPR";
 
@@ -29,7 +22,7 @@ const FUNDING_AMOUNT: &str = "100 wxHOPR";
 #[case(3)]
 #[serial]
 #[test_log::test(tokio::test)]
-#[timeout(2*TEST_GLOBAL_TIMEOUT)]
+#[timeout(TEST_GLOBAL_TIMEOUT)]
 #[cfg(feature = "session-client")]
 /// Tests n-hop session establishment over a fully connected channel network.
 ///
@@ -58,6 +51,8 @@ async fn create_n_hop_session(#[case] hops: usize) -> anyhow::Result<()> {
     let dst = nodes[nodes.len() - 1];
     let mid = &nodes[1..nodes.len() - 1];
 
+    tracing::info!(hops, src = %src.address(), dst = %dst.address(), "session test node mapping");
+
     // For n-hop (n >= 1), open channels between ALL pairs to create a fully connected network,
     // so the path planner can leverage the full graph data.
     let all_channels = if hops > 0 {
@@ -82,35 +77,20 @@ async fn create_n_hop_session(#[case] hops: usize) -> anyhow::Result<()> {
         Vec::new()
     };
 
-    // Wait for probing to register opened channels in the graph.
-    // Scale the wait by hop count: larger meshes need more probing rounds.
+    // Wait for channel state to propagate across all nodes by polling the graph
+    // instead of using a fixed sleep. Each node must see all N*(N-1) open channels.
     if !all_channels.is_empty() {
         let chain_info = cluster.chain_client.query_chain_info().await?;
-        let base_delay = chain_propagation_delay(&chain_info);
-        sleep(base_delay * hops as u32).await;
+        let timeout = chain_propagation_delay(&chain_info) * 12;
+        cluster.wait_for_channel_graph(src, all_channels.len(), timeout).await?;
     }
 
-    let (routing, capabilities) = if hops == 0 {
-        (HopRouting::try_from(0_usize)?, SessionCapabilities::empty())
-    } else {
-        (HopRouting::try_from(mid.len())?, SessionCapabilities::default())
-    };
+    let path: Vec<&_> = std::iter::once(src)
+        .chain(mid.iter().copied())
+        .chain(std::iter::once(dst))
+        .collect();
 
-    let _session = src
-        .inner()
-        .connect_to(
-            dst.address(),
-            SessionTarget::UdpStream(SealedHost::Plain(IpOrHost::from_str(":0")?)),
-            HoprSessionClientConfig {
-                forward_path: routing,
-                return_path: routing,
-                capabilities,
-                pseudonym: None,
-                surb_management: None,
-                always_max_out_surbs: false,
-            },
-        )
-        .await?;
+    let _session = cluster.create_session(&path).await?;
 
     // TODO: check here that the destination sees the new session created
 

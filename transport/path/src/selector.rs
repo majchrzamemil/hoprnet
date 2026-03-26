@@ -1,11 +1,10 @@
 use hopr_api::graph::{CostFn, NetworkGraphTraverse, NetworkGraphView, costs::EdgeCostFn, traits::EdgeObservableRead};
-
-/// Default penalty factor applied to edge cost functions.
-const DEFAULT_EDGE_PENALTY: f64 = 0.5;
-
-/// Default minimum acceptable message acknowledgment rate for immediate peers.
-const DEFAULT_MIN_ACK_RATE: f64 = 0.5;
 use hopr_types::{crypto::types::OffchainPublicKey, internal::errors::PathError};
+
+// Duplicated from hopr_network_graph::{DEFAULT_EDGE_PENALTY, DEFAULT_MIN_ACK_RATE}
+// — transport/path cannot depend on impls/graph to avoid circular deps.
+const DEFAULT_EDGE_PENALTY: f64 = 0.5;
+const DEFAULT_MIN_ACK_RATE: f64 = 0.1;
 
 use crate::{
     errors::{PathPlannerError, Result},
@@ -166,7 +165,9 @@ where
     /// in an async executor to avoid blocking the caller).
     #[tracing::instrument(level = "trace", skip(self), fields(src = %src, dest = %dest, hops), ret, err)]
     fn select_path(&self, src: OffchainPublicKey, dest: OffchainPublicKey, hops: usize) -> Result<Vec<PathWithCost>> {
-        tracing::trace!(%src, %dest, hops, "computing paths from graph");
+        let direction = if src == self.me { "forward" } else { "return" };
+        tracing::debug!(%src, %dest, hops, direction, "computing paths from graph");
+
         let length = std::num::NonZeroUsize::new(hops + 1)
             .expect("can never fail, it is physically at least 1 after the addition");
 
@@ -180,6 +181,12 @@ where
                 self.max_paths,
                 EdgeCostFn::forward(length, DEFAULT_EDGE_PENALTY, DEFAULT_MIN_ACK_RATE),
             );
+            tracing::debug!(
+                direction,
+                phase = 1,
+                count = found.len(),
+                "[forward] phase 1 candidates"
+            );
 
             // Phase 2: if not enough paths, do an extended search with EdgeCostFn::forward_without_self_loopback
             // for (length - 1) edges and assume the last hop can be done by anybody.
@@ -188,22 +195,38 @@ where
             {
                 let remaining = self.max_paths - found.len();
                 let extended = compute_extended_forward_paths(&self.graph, &src, &dest, shorter, remaining, &found);
+                tracing::debug!(
+                    direction,
+                    phase = 2,
+                    count = extended.len(),
+                    "[forward] phase 2 extended candidates"
+                );
                 found.extend(extended);
             }
 
             found
         } else {
-            compute_paths(
+            let found = compute_paths(
                 &self.graph,
                 &src,
                 &dest,
                 length,
                 self.max_paths,
                 EdgeCostFn::returning(length, DEFAULT_EDGE_PENALTY, DEFAULT_MIN_ACK_RATE),
-            )
+            );
+            tracing::debug!(direction, count = found.len(), "[return] candidates");
+            found
         };
 
-        // no need to deduplicate for now
+        for (i, pwc) in paths.iter().enumerate() {
+            tracing::debug!(
+                direction,
+                index = i,
+                path = ?pwc.path,
+                cost = pwc.cost,
+                "[{direction}] candidate path"
+            );
+        }
 
         if paths.is_empty() {
             Err(PathPlannerError::Path(PathError::PathNotFound(

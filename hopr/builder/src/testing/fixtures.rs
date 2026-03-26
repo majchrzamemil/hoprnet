@@ -96,6 +96,42 @@ impl ClusterGuard {
         Ok(guards)
     }
 
+    /// Polls the network graph on `observer` until it sees at least `expected_channels`
+    /// edges with non-zero balance, or until `timeout` expires.
+    ///
+    /// This replaces fixed-duration sleeps after channel opening: instead of guessing
+    /// how long chain propagation takes, we actively check the graph state.
+    pub async fn wait_for_channel_graph(
+        &self,
+        observer: &TestedHopr,
+        expected_channels: usize,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let channels = observer.inner().all_channels().await.unwrap_or_default();
+
+            let open_count = channels
+                .iter()
+                .filter(|c| c.status == hopr_lib::ChannelStatus::Open)
+                .count();
+
+            if open_count >= expected_channels {
+                tracing::info!(open_count, expected_channels, "channel graph converged");
+                return Ok(());
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "channel graph did not converge: {open_count}/{expected_channels} open channels after {timeout:?}"
+                );
+            }
+
+            tracing::trace!(open_count, expected_channels, "waiting for channel graph convergence");
+            sleep(Duration::from_secs(2)).await;
+        }
+    }
+
     /// Create a session between the first and last nodes in the path.
     ///
     /// Channels must already be open before calling this method.
@@ -245,7 +281,16 @@ impl ClusterGuard {
 
 pub const SWARM_N: usize = 9;
 
-pub const TEST_GLOBAL_TIMEOUT: Duration = Duration::from_mins(3);
+/// Global per-test timeout.
+///
+/// Coverage instrumentation adds ~2-3x overhead, so we double the timeout
+/// when running under `cargo llvm-cov` (which sets `cfg(coverage)`).
+#[allow(unexpected_cfgs)]
+pub const TEST_GLOBAL_TIMEOUT: Duration = if cfg!(coverage) {
+    Duration::from_mins(12)
+} else {
+    Duration::from_mins(6)
+};
 
 lazy_static::lazy_static! {
     static ref NODE_CHAIN_KEYS: Vec<ChainKeypair> = vec![
@@ -465,9 +510,9 @@ pub fn cluster_fixture(#[default(vec![TestNodeConfig::default(); 3])] configs: V
                         &offchain_keys[i],
                         config,
                         Some(hopr_ct_full_network::ProberConfig {
-                            interval: std::time::Duration::from_secs(1),
+                            interval: std::time::Duration::from_secs(3),
                             ..Default::default()
-                        }), // aggressive setting to facilitate fast n-hop telemetry probing
+                        }), // moderate setting to allow probing without saturating relay traffic
                         connector.clone(),
                         node_db,
                         EchoServer::new(),
@@ -496,16 +541,20 @@ pub fn cluster_fixture(#[default(vec![TestNodeConfig::default(); 3])] configs: V
             .expect("failed to build Tokio runtime in local thread");
 
         rt.block_on(async {
-            // Wait for all nodes to reach the 'Running' state
+            // Wait for all nodes to reach the 'Running' state.
+            // Use generous timeouts to accommodate CI and coverage instrumentation overhead.
             futures::future::try_join_all(cluster.iter().map(|instance| {
-                wait_for_status(instance, &HoprState::Running).timeout(futures_time::time::Duration::from_secs(180))
+                wait_for_status(instance, &HoprState::Running).timeout(futures_time::time::Duration::from_secs(360))
             }))
             .await
             .expect("status wait failed");
 
-            // Wait for full mesh connectivity
+            // Wait for full mesh connectivity and probe warmup.
+            // Connection establishment in the test environment is slow (~100s for 3 nodes)
+            // and probe warmup needs additional rounds after connections are up.
+            // Use generous timeouts to accommodate CI and coverage instrumentation overhead.
             futures::future::try_join_all(cluster.iter().map(|instance| {
-                wait_for_connectivity(instance, swarm_size).timeout(futures_time::time::Duration::from_secs(120))
+                wait_for_connectivity(instance, swarm_size).timeout(futures_time::time::Duration::from_secs(480))
             }))
             .await
             .expect("connectivity wait failed");
