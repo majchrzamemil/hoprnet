@@ -1,5 +1,5 @@
 use hopr_api::{
-    chain::{ChainKeyOperations, ChainReadChannelOperations, ChainValues},
+    chain::{ChainKeyOperations, ChainReadChannelOperations, ChainReadTicketOperations, ChainValues},
     tickets::TicketFactory,
     types::{
         crypto::prelude::*,
@@ -41,7 +41,14 @@ where
     WOut: futures::Sink<(PeerId, Box<[u8]>)> + Clone + Unpin + Send + 'static,
     WOut::Error: std::error::Error,
     WIn: futures::Stream<Item = (PeerId, Box<[u8]>)> + Send + 'static,
-    Chain: ChainKeyOperations + ChainReadChannelOperations + ChainValues + Clone + Send + Sync + 'static,
+    Chain: ChainKeyOperations
+        + ChainReadChannelOperations
+        + ChainReadTicketOperations
+        + ChainValues
+        + Clone
+        + Send
+        + Sync
+        + 'static,
     S: SurbStore + Clone + Send + Sync + 'static,
     TEvt: futures::Sink<TicketEvent> + Clone + Unpin + Send + 'static,
     TEvt::Error: std::error::Error,

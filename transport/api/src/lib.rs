@@ -93,14 +93,16 @@ pub const APPLICATION_TAG_RANGE: std::ops::Range<Tag> = Tag::APPLICATION_TAG_RAN
 
 pub use hopr_api as api;
 use hopr_api::{
-    chain::ChainWriteTicketOperations, tickets::TicketFactory, types::internal::routing::DestinationRouting,
+    chain::{ChainReadTicketOperations, ChainWriteTicketOperations},
+    tickets::TicketFactory,
+    types::internal::routing::DestinationRouting,
 };
 
 // Needs lazy-static, since Duration multiplication by a constant is yet not a const-operation.
 lazy_static::lazy_static! {
     static ref SESSION_INITIATION_TIMEOUT_MAX: Duration = 2 * SESSION_INITIATION_TIMEOUT_BASE * RoutingOptions::MAX_INTERMEDIATE_HOPS as u32;
 
-    static ref PEER_ID_CACHE: moka::future::Cache<PeerId, OffchainPublicKey> = moka::future::Cache::builder()
+    static ref PEER_ID_CACHE: moka::sync::Cache<PeerId, OffchainPublicKey> = moka::sync::Cache::builder()
         .time_to_idle(Duration::from_mins(15))
         .max_capacity(10_000)
         .build();
@@ -112,12 +114,11 @@ lazy_static::lazy_static! {
 ///
 /// This helper uses a cached static object to speed up the lookup and avoid blocking the async
 /// runtime on repeated conversions for the same [`PeerId`]s.
-pub async fn peer_id_to_public_key(peer_id: &PeerId) -> crate::errors::Result<OffchainPublicKey> {
+pub fn peer_id_to_public_key(peer_id: &PeerId) -> crate::errors::Result<OffchainPublicKey> {
     PEER_ID_CACHE
-        .try_get_with_by_ref(peer_id, async {
+        .try_get_with_by_ref(peer_id, move || {
             OffchainPublicKey::from_peerid(peer_id).map_err(|e| e.into())
         })
-        .await
         .map_err(|e: Arc<HoprTransportError>| {
             crate::errors::HoprTransportError::Other(anyhow::anyhow!(
                 "failed to convert peer_id ({:?}) to an offchain public key: {e}",
@@ -172,6 +173,7 @@ where
         + ChainReadAccountOperations
         + ChainWriteTicketOperations
         + ChainKeyOperations
+        + ChainReadTicketOperations
         + ChainValues
         + Clone
         + Send
@@ -749,7 +751,7 @@ where
                 .connected_peers(),
         )
         .filter_map(|peer_id| async move {
-            match peer_id_to_public_key(&peer_id).await {
+            match peer_id_to_public_key(&peer_id) {
                 Ok(key) => Some(key),
                 Err(error) => {
                     tracing::warn!(%peer_id, %error, "failed to convert PeerId to OffchainPublicKey");

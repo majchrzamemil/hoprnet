@@ -28,7 +28,6 @@ async-trait = { workspace = true }
 auto_impl = { workspace = true }
 cfg_eval = { workspace = true, optional = true }
 bloomfilter = { workspace = true }
-futures = { workspace = true }
 hex = { workspace = true }
 lazy_static = { workspace = true }
 moka = { workspace = true }
@@ -59,6 +58,7 @@ hopr-ticket-manager = { workspace = true }
 criterion = { workspace = true, features = ["async_futures", "async_tokio"] }
 hex-literal = { workspace = true }
 lazy_static = { workspace = true }
+parameterized = { workspace = true }
 tokio = { workspace = true }
 
 hopr-chain-connector = { workspace = true, features = [
